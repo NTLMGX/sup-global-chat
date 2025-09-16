@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SUP – Global Chat</title>
+<style>
+  :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#94a3b8; --card:#111827; --accent:#3b82f6;}
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system; background: var(--bg); color: var(--fg); }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px; }
+  .card { background: var(--card); border-radius: 14px; padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+  h1 { margin: 0 0 12px; font-size: 22px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+  input, button { padding: 10px 12px; border-radius: 10px; border: 1px solid #243244; background:#0b1220; color: var(--fg); }
+  input:focus { outline: 2px solid var(--accent); }
+  button { background: var(--accent); border: none; cursor: pointer; font-weight: 600; }
+  button.secondary { background: #334155; }
+  .hidden { display: none !important; }
+
+  .chat-wrap { height: 60vh; border:1px solid #243244; border-radius: 12px; display:flex; flex-direction:column; }
+  .messages { flex:1; overflow-y:auto; padding: 12px; display:flex; flex-direction:column; gap: 10px; }
+  .msg { background:#0b1220; border:1px solid #1f2a3c; padding:10px; border-radius:10px; }
+  .msg .meta { font-size:12px; color:#9aa7b8; margin-bottom:6px; }
+  .msg.me { border-color:#2b5bd1; }
+  .system { text-align:center; color:#9aa7b8; font-size:12px; }
+  .composer { border-top:1px solid #243244; padding: 10px; display:grid; grid-template-columns: 1fr auto; gap:10px; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .pill { padding:6px 10px; background:#0b1220; border:1px solid #243244; border-radius:999px; font-size:12px; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="card" id="loginCard">
+      <h1>Login to SUP</h1>
+      <p class="muted">Only existing accounts can login. No sign-up.</p>
+      <div class="row" style="margin-top:10px;">
+        <input id="username" placeholder="username (e.g., alice)" />
+        <input id="password" type="password" placeholder="password (e.g., alice123)" />
+      </div>
+      <div style="margin-top:10px; display:flex; gap:10px;">
+        <button id="btnLogin">Login</button>
+        <button class="secondary" id="btnDemo">Use demo creds</button>
+      </div>
+      <p id="loginError" class="muted" style="color:#ef4444; margin-top:10px; display:none;">Invalid credentials</p>
+    </div>
+
+    <div class="card hidden" id="chatCard">
+      <div class="topbar">
+        <h1>Global Chat</h1>
+        <div>
+          <span class="pill" id="meBadge"></span>
+          <button class="secondary" id="btnLogout" style="margin-left:8px;">Logout</button>
+        </div>
+      </div>
+
+      <div class="chat-wrap">
+        <div id="messages" class="messages"></div>
+        <div class="composer">
+          <input id="composerInput" placeholder="Type a message..." />
+          <button id="btnSend">Send</button>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:8px;">Everyone who logs in shares this single room. Your ID shows on your messages.</p>
+    </div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    const $ = sel => document.querySelector(sel);
+    const state = {
+      token: localStorage.getItem("token") || null,
+      username: localStorage.getItem("username") || null,
+      displayName: localStorage.getItem("displayName") || null,
+      socket: null
+    };
+
+    function showLogin() {
+      $("#loginCard").classList.remove("hidden");
+      $("#chatCard").classList.add("hidden");
+    }
+
+    function showChat() {
+      $("#loginCard").classList.add("hidden");
+      $("#chatCard").classList.remove("hidden");
+      $("#meBadge").textContent = state.displayName ? `You: ${state.displayName}` : `You: ${state.username}`;
+    }
+
+    async function login(username, password) {
+      $("#loginError").style.display = "none";
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ username, password })
+      });
+      if (!res.ok) {
+        $("#loginError").style.display = "block";
+        return;
+      }
+      const data = await res.json();
+      state.token = data.token;
+      state.username = data.username;
+      state.displayName = data.displayName;
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("username", data.username);
+      localStorage.setItem("displayName", data.displayName);
+      initSocket();
+      showChat();
+    }
+
+    function logout() {
+      localStorage.removeItem("token");
+      localStorage.removeItem("username");
+      localStorage.removeItem("displayName");
+      if (state.socket) { state.socket.disconnect(); state.socket = null; }
+      state.token = null; state.username = null; state.displayName = null;
+      showLogin();
+    }
+
+    function addSystem(text, ts) {
+      const div = document.createElement("div");
+      div.className = "system";
+      const time = ts ? new Date(ts).toLocaleTimeString() : "";
+      div.textContent = `${text} ${time ? "• " + time : ""}`;
+      $("#messages").appendChild(div);
+      $("#messages").scrollTop = $("#messages").scrollHeight;
+    }
+
+    function addMessage(msg) {
+      const div = document.createElement("div");
+      const isMe = msg.user?.username === state.username;
+      div.className = "msg" + (isMe ? " me" : "");
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const who = msg.user?.displayName || msg.user?.username || "Unknown";
+      meta.textContent = `${who} • ${new Date(msg.ts).toLocaleTimeString()}`;
+      const body = document.createElement("div");
+      body.textContent = msg.text;
+      div.appendChild(meta);
+      div.appendChild(body);
+      $("#messages").appendChild(div);
+      $("#messages").scrollTop = $("#messages").scrollHeight;
+    }
+
+    function initSocket() {
+      if (!state.token) return;
+      state.socket = io("/", { auth: { token: state.token } });
+
+      state.socket.on("connect_error", (err) => {
+        addSystem("Auth failed. Please login again.");
+        logout();
+      });
+
+      state.socket.on("chat:history", (arr) => {
+        $("#messages").innerHTML = "";
+        arr.forEach(addMessage);
+      });
+
+      state.socket.on("chat:message", addMessage);
+
+      state.socket.on("chat:system", ({ text, ts }) => addSystem(text, ts));
+    }
+
+    // UI hooks
+    $("#btnLogin").addEventListener("click", () => {
+      const u = $("#username").value.trim();
+      const p = $("#password").value.trim();
+      if (!u || !p) return;
+      login(u, p);
+    });
+
+    $("#btnDemo").addEventListener("click", () => {
+      $("#username").value = "alice";
+      $("#password").value = "alice123";
+    });
+
+    $("#btnSend").addEventListener("click", () => {
+      const text = $("#composerInput").value.trim();
+      if (!text || !state.socket) return;
+      state.socket.emit("chat:send", text);
+      $("#composerInput").value = "";
+    });
+
+    $("#composerInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") $("#btnSend").click();
+    });
+
+    $("#btnLogout").addEventListener("click", logout);
+
+    // boot
+    if (state.token) {
+      showChat();
+      initSocket();
+    } else {
+      showLogin();
+    }
+  </script>
+</body>
+</html>
